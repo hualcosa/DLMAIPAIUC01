@@ -1,0 +1,888 @@
+----------------------------------------
+Contents of file: ./src/hotel_booking_api.py
+----------------------------------------
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Optional, Literal, List
+from agent import BookingWorkflow
+
+# Initialize FastAPI app
+app = FastAPI()
+
+# Initialize the BookingWorkflow instance
+workflow = BookingWorkflow(debug=True)
+
+
+# Define the request and response models for FastAPI
+class BookingState(BaseModel):
+    user_message: Optional[str] = None
+    intent: Optional[
+        Literal[
+            "make a reservation", "check reservation", "other", "change reservation"
+        ]
+    ] = None
+    full_name: Optional[str] = None
+    check_in_date: Optional[str] = None
+    check_out_date: Optional[str] = None
+    num_guests: Optional[int] = None
+    payment_method: Optional[str] = None
+    breakfast_included: Optional[bool] = None
+    valid_info: Optional[bool] = None
+    error: Optional[List[str]] = None
+    not_filled_keys: Optional[List[str]] = None
+    response: Optional[str] = None
+
+
+@app.post("/run_workflow/", response_model=BookingState)
+async def run_workflow(state: BookingState):
+    try:
+        # Convert Pydantic model to dictionary
+        state_dict = state.dict(exclude_unset=True)
+        # Run the workflow graph with the given state
+        updated_state = workflow.run_graph(state_dict)
+        # Return the updated state
+        return BookingState(**updated_state)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+----------------------------------------
+
+----------------------------------------
+Contents of file: ./src/pydantic_classes.py
+----------------------------------------
+from pydantic import BaseModel, Field
+from typing import Optional, Literal, TypedDict
+
+
+class IntentClassification(BaseModel):
+    intent: Literal[
+        "make a reservation", "check reservation", "change reservation", "other"
+    ] = Field(..., description="The classified intent of the user's message")
+
+
+class BookingInfo(BaseModel):
+    full_name: Optional[str] = Field(None, description="The full name of the guest")
+    check_in_date: Optional[str] = Field(
+        None, description="Check-in date for the reservation"
+    )
+    check_out_date: Optional[str] = Field(
+        None, description="Check-out date for the reservation"
+    )
+    num_guests: Optional[int] = Field(
+        None, description="Number of guests for the reservation"
+    )
+    payment_method: Optional[str] = Field(
+        None, description="Payment method used for the reservation"
+    )
+    breakfast_included: Optional[bool] = Field(
+        None, description="Whether breakfast is included"
+    )
+
+
+# Define the state using TypedDict
+class BookingState(TypedDict):
+    user_message: Optional[str]
+    intent: Optional[
+        Literal[
+            "make a reservation", "check reservation", "change reservation", "other"
+        ]
+    ]
+    full_name: Optional[str]
+    check_in_date: Optional[str]
+    check_out_date: Optional[str]
+    num_guests: Optional[int]
+    payment_method: Optional[str]
+    breakfast_included: Optional[bool]
+    valid_info: Optional[bool]
+    error: Optional[str]
+    not_filled_keys: Optional[list[str]]
+    response: Optional[str]
+
+----------------------------------------
+
+----------------------------------------
+Contents of file: ./src/agent.py
+----------------------------------------
+import re
+import uuid
+import sqlite3
+import json
+from datetime import datetime
+
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+from pydantic_classes import (
+    BookingState,
+    IntentClassification,
+    BookingInfo,
+)
+from chains import (
+    create_intent_chain,
+    create_booking_info_chain,
+    create_booking_change_chain,
+    create_response_generation_chain,
+    create_summarization_chain,
+    create_correction_chain,
+)
+
+
+class BookingWorkflow:
+    NECESSARY_INFORMATION = [
+        "full_name",
+        "check_in_date",
+        "check_out_date",
+        "num_guests",
+        "payment_method",
+        "breakfast_included",
+    ]
+
+    def __init__(self, db_path: str = "conversation_history.db", debug: bool = False):
+        """
+        Initializes the BookingWorkflow.
+
+        Args:
+            db_path (str): Path to the SQLite database.
+            debug (bool): If True, enables debug mode to print state before and after each node execution.
+        """
+        self.debug = debug
+
+        # Initialize chains
+        self.intent_chain = create_intent_chain()
+        self.booking_info_chain = create_booking_info_chain()
+        self.booking_change_chain = create_booking_change_chain()
+        self.response_chain = create_response_generation_chain()
+        self.summarization_chain = create_summarization_chain()
+        self.correction_chain = create_correction_chain()
+
+        # Setup state graph
+        self.workflow = StateGraph(BookingState)
+        self._setup_graph()
+
+        # Setup SQLite checkpointer
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.checkpointer = SqliteSaver(self.conn)
+
+        # Compile the graph
+        self.app = self.workflow.compile(checkpointer=self.checkpointer)
+
+    def _setup_graph(self):
+        # Define state transitions
+        self.workflow.add_node("detect_intent", self.detect_intent)
+        self.workflow.add_node("collect_information", self.collect_information)
+        self.workflow.add_node("validate_information", self.validate_information)
+        self.workflow.add_node("generate_response", self.generate_response)
+        self.workflow.add_node("summarize_booking", self.summarize_booking)
+        self.workflow.add_node("change_information", self.change_information)
+        self.workflow.add_node("ask_for_correction", self.ask_for_correction)
+
+        # Define edges
+        self.workflow.set_entry_point("detect_intent")
+
+        # Add conditional edges based on the intent
+        self.workflow.add_conditional_edges(
+            "detect_intent",
+            lambda state: state.get("intent", "other"),
+            {
+                "make a reservation": "collect_information",
+                "check reservation": "summarize_booking",
+                "change reservation": "change_information",
+                "other": "generate_response",
+            },
+        )
+        self.workflow.add_edge("collect_information", "validate_information")
+
+        # Conditional edge after validate_information
+        self.workflow.add_conditional_edges(
+            "validate_information",
+            lambda state: "ask_for_correction"
+            if not state.get("valid_info", False)
+            else "generate_response",
+            {
+                "ask_for_correction": "ask_for_correction",
+                "generate_response": "generate_response",
+            },
+        )
+
+        self.workflow.add_edge("change_information", "summarize_booking")
+        self.workflow.add_edge("generate_response", END)
+        self.workflow.add_edge("summarize_booking", END)
+        self.workflow.add_edge("ask_for_correction", END)
+
+    def _print_state(self, state: dict, message: str):
+        """
+        Helper method to print the current state in a formatted manner.
+
+        Args:
+            state (dict): The current state of the booking.
+            message (str): Custom message to display.
+        """
+        print(f"\n=== {message} ===")
+        print(json.dumps(state, indent=4, default=str))
+        print("========================\n")
+
+    def detect_intent(self, state: BookingState) -> BookingState:
+        if self.debug:
+            self._print_state(state, "Before detect_intent")
+
+        payload = {
+            "assistant_question": state["response"] if "response" in state else None,
+            "answer": state["user_message"],
+        }
+        result = self.intent_chain.invoke(payload)
+        state["intent"] = result.intent
+
+        if self.debug:
+            self._print_state(state, "After detect_intent")
+
+        return state
+
+    def collect_information(self, state: BookingState) -> BookingState:
+        if self.debug:
+            self._print_state(state, "Before collect_information")
+
+        # Invoke the booking_info_chain to extract booking information
+        extracted_info = self.booking_info_chain.invoke({
+            "message": state["user_message"]
+        })
+
+        # Update the state with the extracted information
+        if (
+            extracted_info.full_name is not None
+            and "full_name" in state["not_filled_keys"]
+        ):
+            state["full_name"] = extracted_info.full_name
+            state["not_filled_keys"].remove("full_name")
+        if (
+            extracted_info.check_in_date is not None
+            and "check_in_date" in state["not_filled_keys"]
+        ):
+            state["check_in_date"] = extracted_info.check_in_date
+            state["not_filled_keys"].remove("check_in_date")
+        if (
+            extracted_info.check_out_date is not None
+            and "check_out_date" in state["not_filled_keys"]
+        ):
+            state["check_out_date"] = extracted_info.check_out_date
+            state["not_filled_keys"].remove("check_out_date")
+        if (
+            extracted_info.num_guests is not None
+            and "num_guests" in state["not_filled_keys"]
+        ):
+            state["num_guests"] = extracted_info.num_guests
+            state["not_filled_keys"].remove("num_guests")
+        if (
+            extracted_info.payment_method is not None
+            and "payment_method" in state["not_filled_keys"]
+        ):
+            state["payment_method"] = extracted_info.payment_method
+            state["not_filled_keys"].remove("payment_method")
+        if (
+            extracted_info.breakfast_included is not None
+            and "breakfast_included" in state["not_filled_keys"]
+        ):
+            state["breakfast_included"] = extracted_info.breakfast_included
+            state["not_filled_keys"].remove("breakfast_included")
+
+        if self.debug:
+            self._print_state(state, "After collect_information")
+
+        return state
+
+    def change_information(self, state: BookingState) -> BookingState:
+        if self.debug:
+            self._print_state(state, "Before change_information")
+
+        # Invoke the booking_change_chain to identify the booking information that needs to be changed
+        payload = {
+            "message": state["user_message"],
+            "full_name": state.get("full_name"),
+            "check_in_date": state.get("check_in_date"),
+            "check_out_date": state.get("check_out_date"),
+            "num_guests": state.get("num_guests"),
+            "payment_method": state.get("payment_method"),
+            "breakfast_included": state.get("breakfast_included"),
+        }
+        info_to_change = self.booking_change_chain.invoke(payload)
+
+        # Change the information requested by the user
+        for key, value in info_to_change.dict().items():
+            if value is not None:
+                state[key] = value
+                if key in state["not_filled_keys"]:
+                    state["not_filled_keys"].remove(key)
+
+        # Change intent back to make a reservation in case there is still information to be collected
+        if len(state["not_filled_keys"]) > 0:
+            state["intent"] = "make a reservation"
+        else:
+            state["intent"] = "check reservation"
+
+        if self.debug:
+            self._print_state(state, "After change_information")
+
+        return state
+
+    def validate_information(self, state: BookingState) -> BookingState:
+        if self.debug:
+            self._print_state(state, "Before validate_information")
+
+        def is_valid_date_format(date_string):
+            pattern = r"^\d{4}-\d{2}-\d{2}$"
+            if not re.match(pattern, date_string):
+                return False
+            try:
+                datetime.strptime(date_string, "%Y-%m-%d")
+                return True
+            except ValueError:
+                return False
+
+        errors = []
+
+        # Validate full_name
+        if "full_name" in state and len(state["full_name"]) < 3:
+            errors.append("Full name must be at least 3 characters long.")
+            state.setdefault("not_filled_keys", []).append("full_name")
+
+        # Validate check_in_date
+        if "check_in_date" in state:
+            if not is_valid_date_format(state["check_in_date"]):
+                errors.append("Check-in date format is invalid (YYYY-MM-DD).")
+                state.setdefault("not_filled_keys", []).append("check_in_date")
+            elif (
+                datetime.strptime(state["check_in_date"], "%Y-%m-%d") < datetime.today()
+            ):
+                errors.append("Check-in date cannot be in the past.")
+                state.setdefault("not_filled_keys", []).append("check_in_date")
+
+        # Validate check_out_date
+        if "check_out_date" in state:
+            if not is_valid_date_format(state["check_out_date"]):
+                errors.append("Check-out date format is invalid (YYYY-MM-DD).")
+                state.setdefault("not_filled_keys", []).append("check_out_date")
+            elif (
+                datetime.strptime(state["check_out_date"], "%Y-%m-%d")
+                < datetime.today()
+            ):
+                errors.append("Check-out date cannot be in the past.")
+                state.setdefault("not_filled_keys", []).append("check_out_date")
+
+        # Validate date order
+        if "check_in_date" in state and "check_out_date" in state:
+            if datetime.strptime(
+                state["check_out_date"], "%Y-%m-%d"
+            ) <= datetime.strptime(state["check_in_date"], "%Y-%m-%d"):
+                errors.append("Check-out date must be after check-in date.")
+                state.setdefault("not_filled_keys", []).extend([
+                    "check_in_date",
+                    "check_out_date",
+                ])
+
+        # Validate num_guests
+        if "num_guests" in state and state["num_guests"] <= 0:
+            errors.append("Number of guests must be positive.")
+            state.setdefault("not_filled_keys", []).append("num_guests")
+
+        # Validate payment_method
+        valid_payment_methods = ["credit card", "debit card", "cash", "paypal"]
+        if (
+            "payment_method" in state
+            and state["payment_method"].lower() not in valid_payment_methods
+        ):
+            errors.append(
+                f"Invalid payment method. Please choose from: {', '.join(valid_payment_methods)}."
+            )
+            state.setdefault("not_filled_keys", []).append("payment_method")
+
+        # Update the state
+        state["valid_info"] = len(errors) == 0
+        state["error"] = errors
+
+        if self.debug:
+            self._print_state(state, "After validate_information")
+
+        return state
+
+    def generate_response(self, state: BookingState) -> BookingState:
+        if self.debug:
+            self._print_state(state, "Before generate_response")
+
+        payload = {
+            "intent": state["intent"],
+            "full_name": state.get("full_name"),
+            "check_in_date": state.get("check_in_date"),
+            "check_out_date": state.get("check_out_date"),
+            "num_guests": state.get("num_guests"),
+            "payment_method": state.get("payment_method"),
+            "breakfast_included": state.get("breakfast_included"),
+        }
+
+        state["response"] = self.response_chain.invoke(input=payload)
+
+        if self.debug:
+            self._print_state(state, "After generate_response")
+
+        return state
+
+    def summarize_booking(self, state: BookingState) -> BookingState:
+        if self.debug:
+            self._print_state(state, "Before summarize_booking")
+
+        payload = {
+            "intent": state["intent"],
+            "full_name": state.get("full_name"),
+            "check_in_date": state.get("check_in_date"),
+            "check_out_date": state.get("check_out_date"),
+            "num_guests": state.get("num_guests"),
+            "payment_method": state.get("payment_method"),
+            "breakfast_included": state.get("breakfast_included"),
+        }
+
+        state["response"] = self.summarization_chain.invoke(input=payload)
+
+        if self.debug:
+            self._print_state(state, "After summarize_booking")
+
+        return state
+
+    def ask_for_correction(self, state: BookingState) -> BookingState:
+        if self.debug:
+            self._print_state(state, "Before ask_for_correction")
+
+        payload = {
+            "full_name": state.get("full_name"),
+            "check_in_date": state.get("check_in_date"),
+            "check_out_date": state.get("check_out_date"),
+            "num_guests": state.get("num_guests"),
+            "payment_method": state.get("payment_method"),
+            "breakfast_included": state.get("breakfast_included"),
+            "errors": state.get("error"),
+        }
+
+        state["response"] = self.correction_chain.invoke(input=payload)
+        print("next question: ", state["response"])
+
+        if self.debug:
+            self._print_state(state, "After ask_for_correction")
+
+        return state
+
+    def run_graph(self, payload: dict) -> dict:
+        """
+        Runs the booking workflow graph with the given payload.
+
+        Args:
+            payload (dict): Initial payload containing at least the 'user_message' and other optional fields.
+
+        Returns:
+            dict: The final state after running the workflow.
+        """
+        # Ensure 'not_filled_keys' exists in the payload
+        if "not_filled_keys" not in payload:
+            payload["not_filled_keys"] = self.NECESSARY_INFORMATION.copy()
+
+        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        return self.app.invoke(payload, config=config)
+
+
+# Example usage:
+if __name__ == "__main__":
+    # Initialize the workflow in debug mode
+    workflow = BookingWorkflow(debug=True)
+
+    # Initial payload
+    initial_payload = {
+        "user_message": "I want to book a room.",
+        "intent": "make a reservation",
+        "not_filled_keys": workflow.NECESSARY_INFORMATION.copy(),
+    }
+
+    # Run the workflow
+    result_state = workflow.run_graph(initial_payload)
+
+    # Final state
+    print("Final State:", json.dumps(result_state, indent=4, default=str))
+
+----------------------------------------
+
+----------------------------------------
+Contents of file: ./src/frontend.py
+----------------------------------------
+import streamlit as st
+import requests
+
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+# session state variable to track whether we are doing the first question
+if "first_query" not in st.session_state:
+    st.session_state.first_query = True
+# stores the current state of the hotel assistant
+if "hotel_assitant_state" not in st.session_state:
+    st.session_state.hotel_assitant_state = None
+# variable use to toggle the developer view on or off
+if "developer_view" not in st.session_state:
+    st.session_state.developer_view = False
+
+# Base URL of the FastAPI server
+BASE_URL = "http://127.0.0.1:8000"
+
+
+# Function to interact with the /run_workflow/ endpoint
+def interact_with_workflow(state):
+    try:
+        # Send a POST request to the /run_workflow/ endpoint
+        response = requests.post(f"{BASE_URL}/run_workflow/", json=state)
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Parse and return the JSON response
+            parsed_response = response.json()
+            parsed_response = {
+                k: v for k, v in parsed_response.items() if v is not None
+            }
+            return parsed_response
+        else:
+            # If the request failed, print the error details
+            print(f"Error: {response.status_code}, Detail: {response.text}")
+    except requests.exceptions.RequestException as e:
+        # Handle any request exceptions that may occur
+        print(f"Request failed: {e}")
+
+
+def process_text(prompt):
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.spinner("processing your request..."):
+        # If this is the first message the user is sending to the assistant, we build the payload
+        if st.session_state.first_query:
+            state = {
+                "user_message": prompt,
+                "not_filled_keys": [
+                    "full_name",
+                    "check_in_date",
+                    "check_out_date",
+                    "num_guests",
+                    "payment_method",
+                    "breakfast_included",
+                ],
+            }
+            st.session_state.first_query = False
+        else:
+            state = st.session_state.hotel_assitant_state
+            state["user_message"] = prompt
+
+        # Query the api endpoint
+        updated_state = interact_with_workflow(state)
+        # Update the state
+        st.session_state.hotel_assitant_state = updated_state
+        # Add assistant response to chat history
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": updated_state["response"],
+        })
+
+    return updated_state["response"]
+
+
+# Streamlit UI
+st.markdown(
+    """
+<h2 style='text-align: center;'>DLMAIPAIUC01 - Project AI Use Case</h2>
+<h2 style='text-align: center;'>Hotel Booking Application</h2>
+
+<h4 style='text-align: right;'>Hugo Albuquerque Cosme da Siva</h4>
+<h5 style='text-align: right;'>matriculation ID: 92126125</h5>
+""",
+    unsafe_allow_html=True,
+)
+
+# Sidebar for developer view
+with st.sidebar:
+    st.session_state.developer_view = st.checkbox("Developer View")
+
+# Initial introduction (only if it's the first run)
+if "introduced" not in st.session_state:
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": "Hello! I'm GrandVista's Hotel booking assistant. How can I assist you today?",
+    })
+    st.session_state.introduced = True
+
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Create a container for the chat input and recording button
+input_container = st.container()
+
+prompt = st.chat_input("Type your message here")
+
+# Process text input
+if prompt:
+    process_text(prompt)
+    st.rerun()
+
+# Display assistant state if developer view is toggled
+if st.session_state.developer_view:
+    st.write(st.session_state.hotel_assitant_state)
+
+----------------------------------------
+
+----------------------------------------
+Contents of file: ./src/chains.py
+----------------------------------------
+from dotenv import load_dotenv
+from langchain.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langchain_core.output_parsers import StrOutputParser
+from langchain.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from pydantic_classes import IntentClassification, BookingInfo
+from prompts import (
+    intent_prompt,
+    booking_info_prompt,
+    booking_change_prompt,
+    response_chain_sys_prompt,
+    response_chain_human_message,
+    summarization_chain_sys_prompt,
+    summarization_chain_human_message,
+    correction_chain_prompt,
+)
+
+load_dotenv()
+
+
+# LangChain setup for intent detection
+def create_intent_chain():
+    # LangChain setup for intent detection
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+
+    # Create a structured output chain for intent detection
+    intent_chain = intent_prompt | llm.with_structured_output(IntentClassification)
+
+    return intent_chain
+
+
+def create_booking_info_chain():
+    # LangChain setup for booking information extraction
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+
+    # Create a structured output chain for booking information extraction
+    booking_info_chain = booking_info_prompt | llm.with_structured_output(BookingInfo)
+
+    return booking_info_chain
+
+
+def create_booking_change_chain():
+    # LangChain setup for changing information characteristics
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+
+    # Create a structured output chain for booking information extraction
+    booking_change_chain = booking_change_prompt | llm.with_structured_output(
+        BookingInfo
+    )
+
+    return booking_change_chain
+
+
+def create_response_generation_chain():
+    # Create the chat prompt template
+    generate_response_prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(response_chain_sys_prompt),
+        HumanMessagePromptTemplate.from_template(response_chain_human_message),
+    ])
+
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    response_chain = generate_response_prompt | llm | StrOutputParser()
+
+    return response_chain
+
+
+def create_summarization_chain():
+    # Create the chat prompt template
+    summarize_booking_prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(summarization_chain_sys_prompt),
+        HumanMessagePromptTemplate.from_template(summarization_chain_human_message),
+    ])
+
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    summarize_booking_chain = summarize_booking_prompt | llm | StrOutputParser()
+
+    return summarize_booking_chain
+
+
+def create_correction_chain():
+    # Create the chain
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    correction_chain = correction_chain_prompt | llm | StrOutputParser()
+    return correction_chain
+
+----------------------------------------
+
+----------------------------------------
+Contents of file: ./src/__init__.py
+----------------------------------------
+
+----------------------------------------
+
+----------------------------------------
+Contents of file: ./src/prompts.py
+----------------------------------------
+from langchain.prompts import ChatPromptTemplate
+
+intent_prompt = ChatPromptTemplate.from_template("""
+    You are an AI assistant for a hotel booking system. The user will provide a message, and you must classify their intent into one of the following categories:
+    1. "make a reservation"
+    2. "check reservation"
+    3. "change reservation"
+    4. "other"
+
+    Last asked question: {assistant_question} 
+    User's reply: {answer}
+
+    Classify the intent as one of these four: "make a reservation", "check reservation", "change reservation", or "other".
+
+    Observation:
+    1. if the "Last asked question" is empty, interpret the answer as the first reply of the conversation
+    """)
+
+booking_info_prompt = ChatPromptTemplate.from_template("""
+    You are an AI assistant for a hotel booking system. Your task is to extract relevant booking information from the user's message. Extract only the information that is explicitly mentioned in the message.
+
+    User's message: {message}
+
+    Please extract the following information if present:
+    1. Full Name (The full name of the guest. Only first name is not enough to fill this information)
+    2. Check-in Date
+    3. Check-out Date
+    4. Number of Guests
+    5. Payment Method
+    6. Whether Breakfast is Included
+
+    If a piece of information is not mentioned in the message, leave it as None.
+
+    Provide the extracted information in a structured format.
+    """)
+
+booking_change_prompt = ChatPromptTemplate.from_template("""
+    You are an AI assistant for a hotel booking system. Your task is to extract the information the user wants to change in his reservation. Extract only the information that is explicitly mentioned in the message.
+
+    User's message: {message}
+
+    Current booking information:
+    Full Name: {full_name}
+    Check-in Date: {check_in_date}
+    Check-out Date: {check_out_date}
+    Number of Guests: {num_guests}
+    Payment Method: {payment_method}
+    Breakfast Included: {breakfast_included}
+
+    Please detect if the user wants to change one or more messages from the list below:
+    1. Full Name
+    2. Check-in Date
+    3. Check-out Date
+    4. Number of Guests
+    5. Payment Method
+    6. Whether Breakfast is Included
+
+    Attention:
+    1. If the user wants to change the reservation date, carefully evaluate whether it is necessary to change only Check-in date, only the Check-out date, or to change both dates.
+
+    Provide the extracted information in a structured format.
+    """)
+
+
+response_chain_sys_prompt = """
+    You are a hotel booking assistant. Your primary tasks are:
+    1. Assist users in making new reservations
+    2. Help users check existing reservations
+    3. Politely redirect users if their query is unrelated to reservations
+
+    Remember to be friendly, professional, and focused on the user's needs.
+    """
+
+response_chain_human_message = """
+    Generate an appropriate response based on the user's intent and the current state of the conversation.
+
+    Current intent: {intent}
+
+    Current booking information:
+    Full Name: {full_name}
+    Check-in Date: {check_in_date}
+    Check-out Date: {check_out_date}
+    Number of Guests: {num_guests}
+    Payment Method: {payment_method}
+    Breakfast Included: {breakfast_included}
+
+    Instructions based on intent:
+
+    1. If the intent is "other":
+    Politely inform the user that you can only assist with making or checking reservations. Say something like: "As a hotel booking assistant, I am only able to answer questions related to making a reservation or checking a reservation. Would you like help with this?"
+
+    2. If the intent is "make a reservation":
+    Review the booking information provided. For any information that is None or not provided, ask a follow-up question to collect that specific piece of information. Be polite and ask one question at a time. If all information is provided, confirm the details and ask if the user wants to proceed with the booking.
+    
+    Observations:
+
+    1. When you generate responses related to dates, ALWAYS ask the user to provide the dates in the format YYYY-MM-DD.
+    2. When refering to the customer use only their first name. Nonetheless make sure you collect the full customer's name.
+    3. If the user's full name was already provided (Full Name is not None), do not introduce yourself again.
+
+    Generate a response that addresses the user's intent based on these instructions:
+    """
+
+summarization_chain_sys_prompt = """
+You are a hotel booking assistant. Your task is to summarize the current booking information, 
+highlight any missing details, and ask the user if they want to provide missing information or make changes.
+
+Remember to be friendly, professional, and focused on the user's needs.
+"""
+
+# Human message template
+summarization_chain_human_message = """
+Summarize the current booking information and generate an appropriate response.
+
+Current booking information:
+Full Name: {full_name}
+Check-in Date: {check_in_date}
+Check-out Date: {check_out_date}
+Number of Guests: {num_guests}
+Payment Method: {payment_method}
+Breakfast Included: {breakfast_included}
+
+Instructions:
+1. Provide a summary of the information collected so far.
+2. If any necessary information is missing, mention that it's not available.
+3. Ask the user if they would like to provide any missing information or if they need any changes to their reservation.
+4. If all information is provided, confirm that the reservation is booked and ask if you can help with anything else.
+
+Observations:
+1. You are in an active conversation with a user, so be friendly and professional. Avoid talking like if you were sending a message or an email
+2. DO NOT ask the user to provide any additional type of information besides the ones highlighted in "Current booking information"
+"""
+
+correction_chain_prompt = ChatPromptTemplate.from_template("""
+You are a polite and professional hotel booking assistant from GrandVista Hotel. The user has provided some information for their booking, but there were errors. Please create a message asking the user to correct the information. Be specific about what needs to be corrected, but maintain a friendly and helpful tone.
+
+Provided information:
+Full Name: {full_name}
+Check-in Date: {check_in_date}
+Check-out Date: {check_out_date}
+Number of Guests: {num_guests}
+Payment Method: {payment_method}
+Breakfast Included: {breakfast_included}
+
+Errors identified:
+{errors}
+
+Observations:
+1. If the Full Name was not provided, refer to user customer as "Dear Guest"
+2. You are in an active conversation with a user, so be friendly and professional. Avoid talking like if you were sending a message or an email
+3. When refering to the customer use only their first name.
+4. Ask the customer at most for two things. Do not overload him with too many corrections at once. 
+
+Please rephrase these errors into a polite and professional message asking the user to correct the information. Do not output anything besides the message to the user:
+""")
+
+----------------------------------------
+
