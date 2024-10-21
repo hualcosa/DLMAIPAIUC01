@@ -7,7 +7,7 @@ This project implements a simple chatbot for hotel room bookings as part of the 
 The chatbot is built to assist users in booking hotel rooms by gathering key information through a series of questions and answers. It utilizes LangChain for conversation management, LangGraph for flow control, and GPT-4o calls to enhance the quality of responses. The entire ChatEngine logic was encapsulated in a class called BookingWorkflow, which allowed the graph to be converted into an API using FastAPI. The frontend was developed using Streamlit.
 
 ## Demo
-(Youtube Video)[]
+[![Video Title](https://img.youtube.com/vi/dN7ZdGl78w4/maxresdefault.jpg)](https://www.youtube.com/watch?v=dN7ZdGl78w4)
 
 ## Technologies Used
 
