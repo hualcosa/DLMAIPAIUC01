@@ -46,7 +46,6 @@ To run this project locally:
    `EXPORT OPENAI_API_KEY="sk-********"`
 
 3. Install the required dependencies:
-
   `pip install -r requirements.txt`
 
 4. Start the FastAPI server:
@@ -57,7 +56,6 @@ To run this project locally:
 5. Open a separate terminal. Navigate to the src folder and launch the streamlit app:
 ```
    cd src
-
    streamlit run frontend.py --server.port 8501
 ```
 The app will be automatically launched in your browser.
