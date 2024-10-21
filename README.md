@@ -40,21 +40,21 @@ The chatbot is built to assist users in booking hotel rooms by gathering key inf
 To run this project locally:
 
 1. Clone the repository:
-   ```
-   git clone https://github.com/hualcosa/DLMAIPAIUC01.git
-   ```
+ ```
+ git clone https://github.com/hualcosa/DLMAIPAIUC01.git
+ ```
 
-3. Export your OpenAI api key to your active terminal:
-   ```
-   EXPORT OPENAI_API_KEY="sk-********"
-   ```
+2. Export your OpenAI api key to your active terminal:
+ ```
+ EXPORT OPENAI_API_KEY="sk-********"
+ ```
 
-5. Install the required dependencies:
-  ```
-  pip install -r requirements.txt
-  ```
+3. Install the required dependencies:
+```
+pip install -r requirements.txt
+```
 
-7. Start the FastAPI server:
+4. Start the FastAPI server:
 ```
    cd src\
    uvicorn hotel\_booking\_api\:app --reload --port 8000
