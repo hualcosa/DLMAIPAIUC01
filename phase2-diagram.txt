@@ -1,0 +1,139 @@
+Slide 1: Introduction
+
+Title: "GrandVista Hotel Booking Chatbot"
+
+Brief overview: The GrandVista Hotel Booking Chatbot is an interactive, user-friendly AI-powered assistant designed to facilitate hotel room bookings. Leveraging Large Language Model's language understanding capabilities, the chatbot uses an agentic approach to provide a conversational booking experience for users, handling essential inquiries and capturing necessary booking information efficiently.
+
+
+
+Slide 2: Project Objectives
+
+Title: "Project Objectives"
+
+The goal of this project is to develop a chatbot for booking a hotel room with the following features:
+
+Conversational Interface: Engage users through natural language conversations to collect booking details, powered by an AI agent.
+
+Information Collection: The following information will be gathered by the bot:
+
+Full Name
+
+Check-in and Check-out Dates
+
+Number of Guests
+
+Preferred Payment Method
+
+Breakfast Inclusion Preference
+
+Input Handling: Manage invalid inputs and guide users to provide correct information.
+
+Booking Summary: At the end of the conversation, the chatbot will summarize and confirm booking details with users.
+
+Slide 3: Technologies Used
+
+
+
+Title: "Technologies Used"
+
+List of technologies:
+
+Python for chatbot logic.
+
+FastAPI for API development.
+
+Streamlit for the frontend.
+
+LangChain, LangGraph, GPT-4o, SQLite, and Pydantic.
+
+Mention how each technology contributes to different parts of the project.
+
+Slide 4: System Architecture
+
+
+
+Title: "System Architecture"
+
+High-level diagram showing the integration of the various technologies: FastAPI backend, Streamlit frontend, and the workflow with LangChain and GPT-4o.
+
+Describe the flow from user interaction to backend processing.
+
+Slide 5: Repository Structure
+
+
+
+Title: "Repository Structure"
+
+Explain the contents of the src/ folder:
+
+hotel_booking_api.py: FastAPI endpoints for managing requests.
+
+pydantic_classes.py: Data models for input validation.
+
+agent.py: Core BookingWorkflow class managing conversation flow.
+
+frontend.py: Streamlit UI interacting with the backend.
+
+chains.py and prompts.py: Chains for NLP tasks and prompt templates.
+
+Slide 6: BookingWorkflow Class
+
+
+
+Title: "BookingWorkflow Class"
+
+Explain its responsibilities:
+
+Encapsulates ChatEngine logic.
+
+Manages intent detection, information extraction, and response generation.
+
+Converts the workflow into an API using FastAPI.
+
+Slide 7: Frontend Implementation
+
+
+
+Title: "Frontend Implementation"
+
+Discuss how the Streamlit-based UI helps users interact with the chatbot.
+
+Explain the flow: User inputs → State management in hotel_assistant_state → API calls.
+
+Slide 8: Workflow Chains
+
+
+
+Title: "Workflow Chains"
+
+Explain the purpose of the different chains in chains.py:
+
+Intent detection, booking information extraction, booking change requests, response generation, summarization, and correction.
+
+Mention how prompt templates from prompts.py guide the conversation.
+
+Slide 9: Example Workflow Execution
+
+
+
+Title: "Example Workflow Execution"
+
+Provide an example of a typical conversation flow:
+
+User initiates booking → System detects intent → Information is collected → Booking is validated and summarized.
+
+Slide 10: Conclusion and Future Improvements
+
+
+
+Title: "Conclusion & Future Improvements"
+
+Recap the project’s aim to simplify room booking with conversational AI.
+
+Mention potential improvements:
+
+Expand the chatbot to handle additional queries.
+
+Integration with live booking systems.
+
+Enhance NLP capabilities for more complex conversations.
